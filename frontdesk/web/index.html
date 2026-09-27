@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>卡秀 · 房间一览</title><link rel="stylesheet" href="/simple.css"><link rel="stylesheet" href="/batch.css">
+</head>
+<body>
+  <main>
+    <header><div class="brand"><span class="logo">卡</span><div><h1>卡秀商务酒店</h1><p>阿育王塔店 · 房间一览</p></div></div><div class="head-right"><span id="currentDate"></span><span id="connection">正在连接…</span></div></header>
+    <div id="offline" class="error hidden" role="alert">暂时连接不到本机服务，请重新运行“启动前台.cmd”。</div>
+    <div class="date-strip"><button id="yesterdayButton" class="history-day" aria-pressed="false">昨天</button><nav id="datePicker" class="date-picker" aria-label="选择查看日期"></nav></div>
+    <div class="room-legend"><span class="key-paid">已付</span><span class="key-unpaid">未付</span><span class="key-reserved">已预订</span><span class="key-empty">空房</span><span class="key-held">导入待分房</span><small>预订统一蓝色，付款状态另标文字</small></div>
+    <section id="closureSection" class="closure-section" aria-label="未来关房提醒"><div class="closure-heading"><div><h2>未来关房提醒</h2><p id="otaFreshness">正在核对已登记订单…</p></div><div class="closure-actions"><button id="otaImportButton">导入携程订单</button><button id="otaOrdersButton">待入住订单</button><button id="allAlertsButton">全部提醒</button></div></div><div id="closurePreview"></div><p class="closure-caveat">按已登记和已导入订单计算；美团未录入的订单不计入。请到平台实际关房，按钮只记录人工核对。</p></section>
+    <p id="historyHint" class="history-hint hidden">昨日按现有记录回看（含已退房），不是操作时点快照。点房号查明细；同房多笔金额合并显示。</p>
+    <div class="overview"><div><h2><span id="selectedLabel">今天</span>剩 <strong id="freeCount">—</strong> 间空房</h2><p>点房号登记，按日期查看空房。</p></div><div><div class="money-totals"><div class="daily-total"><span>线上 · 携程＋美团</span><strong id="onlineTotal">¥0</strong></div><div class="daily-total"><span>线下</span><strong id="offlineTotal">¥0</strong></div><div class="daily-total"><span>当前房号合计</span><strong id="dailyTotal">¥0</strong></div></div><p class="money-note">与房号金额逐间相加一致 · 当日分摊 · 含预订，不含已退房</p><p id="moneyScope" class="money-note"></p><button id="moneyDetails" class="money-link">金额明细 / 对账</button></div></div>
+    <section id="rooms" aria-live="polite">正在加载房间…</section>
+    <footer><span>可查看昨天及今天起 7 天 · 携程、美团仍需手动关房</span><div class="footer-actions"><button id="monthlyButton">每月汇总</button><button id="recordsButton">记录 / 修改</button><a href="/api/backup" download>备份数据</a></div></footer>
+  </main>
+  <dialog id="modal" aria-labelledby="dialogTitle"><div id="modalContent"></div></dialog>
+  <div id="toast" class="toast hidden" role="status"></div>
+  <script src="/money.js"></script><script src="/simple.js"></script><script src="/monthly.js"></script><script src="/ota.js"></script>
+</body>
+</html>

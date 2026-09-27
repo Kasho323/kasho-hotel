@@ -1,0 +1,24 @@
+frontdesk/data/
+frontdesk/test-artifacts/
+releases/
+**/__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite3
+*.db
+*.xls
+*.xlsx
+*backup*.json
+*备份*.json
+.env
+.env.*
+
+# Only publish photos actually used by the promotional page.
+assets/photos/*
+!assets/photos/微信图片_20260517031340_1145_163.jpg
+!assets/photos/微信图片_20260517031343_1147_163.jpg
+!assets/photos/微信图片_20260517031350_1152_163.jpg
+!assets/photos/微信图片_20260517031358_1158_163.jpg
+!assets/photos/微信图片_20260518121905_745_73.jpg
+!assets/photos/微信图片_20260518121914_750_73.jpg
+!assets/photos/微信图片_20260518121926_756_73.jpg

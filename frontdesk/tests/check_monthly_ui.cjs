@@ -1,0 +1,20 @@
+const {chromium}=require(process.argv[2]||'playwright');const assert=require('node:assert/strict'),path=require('node:path');
+(async()=>{const browser=await chromium.launch({executablePath:'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',headless:true});try{
+  const page=await browser.newPage({viewport:{width:1280,height:950}}),errors=[];page.on('pageerror',e=>errors.push(e.message));
+  const base='http://127.0.0.1:8766',template=await(await page.request.get(base+'/api/state')).json();assert.equal(template.bookings.length,0);
+  const b=(id,room,channel,guestPaid,start,end,status='在住')=>({id,room,channel,guestPaid,total:guestPaid,rate:guestPaid,start,end,status,quick:true,notes:''});
+  const fixture={...template,today:'2026-09-20',bookings:[b(1,'8306','携程',10001,'2026-08-31','2026-09-02'),b(2,'8801','美团',60000,'2026-09-20','2026-09-22','预订'),{...b(3,'8307','线下',20000,'2026-09-10','2026-09-11','已退房'),releasedOn:'2026-09-10'},b(4,'8307','线下',18000,'2026-09-10','2026-09-11')]};
+  await page.route('**/api/state',route=>route.fulfill({json:fixture}));await page.goto(base);await page.locator('.room').first().waitFor();
+  await page.locator('#monthlyButton').click();assert.equal(await page.locator('#reportMonth').inputValue(),'2026-09');
+  assert.equal(await page.locator('#monthOnline').innerText(),'¥50.00');assert.equal(await page.locator('#monthOffline').innerText(),'¥380.00');assert.equal(await page.locator('#monthTotal').innerText(),'¥430.00');assert.equal(await page.locator('#monthNights').innerText(),'2');
+  assert.equal(await page.locator('[data-month-id]').count(),4);assert.match(await page.locator('[data-month-id="1"]').innerText(),/50.00/);
+  await page.screenshot({path:path.join(__dirname,'../test-artifacts/monthly-overview.png')});
+  await page.locator('#reportMonth').fill('2026-08');await page.locator('#reportMonth').dispatchEvent('change');assert.equal(await page.locator('#monthTotal').innerText(),'¥50.01');
+  await page.locator('#reportMonth').fill('2026-10');await page.locator('#reportMonth').dispatchEvent('change');assert.equal(await page.locator('#monthTotal').innerText(),'¥0.00');assert.match(await page.locator('#monthRows').innerText(),/暂无/);
+  await page.locator('#reportMonth').fill('2026-09');await page.locator('#reportMonth').dispatchEvent('change');await page.locator('#monthDaily summary').click();await page.locator('[data-month-day="2026-09-10"]').click();assert.equal(await page.locator('#moneyDate').inputValue(),'2026-09-10');assert.equal(await page.locator('[data-money-id]').count(),2);
+  await page.getByRole('button',{name:'关闭',exact:true}).click();await page.locator('#monthlyButton').click();await page.locator('[data-month-edit="3"]').click();assert.equal(await page.locator('#editAmount').inputValue(),'200.00');await page.getByRole('button',{name:'关闭',exact:true}).click();
+  for(let i=0;i<21;i++)fixture.bookings.push(b(10+i,'8802','线下',10000,`2026-09-${String(i+1).padStart(2,'0')}`,`2026-09-${String(i+2).padStart(2,'0')}`,'预订'));
+  fixture.revision++;await page.reload();await page.locator('.room').first().waitFor();await page.locator('#monthlyButton').click();assert.equal(await page.locator('[data-month-id]').count(),20);await page.locator('#monthNext').click();assert.equal(await page.locator('[data-month-id]').count(),5);
+  await page.setViewportSize({width:390,height:844});assert.equal(await page.locator('dialog').evaluate(e=>e.scrollWidth<=e.clientWidth),true);await page.screenshot({path:path.join(__dirname,'../test-artifacts/monthly-mobile.png')});
+  assert.deepEqual(errors,[]);console.log('PASS monthly UI: summary, month switch, empty month, daily drilldown, record editing entry, pagination, mobile; no writes.');
+}finally{await browser.close();}})().catch(e=>{console.error(e);process.exitCode=1;});
