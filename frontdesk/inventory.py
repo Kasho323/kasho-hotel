@@ -105,6 +105,8 @@ def validate_imported(state, rooms):
             raise ValueError('导入订单房型不正确')
         if not isinstance(o.get('status'), str) or not isinstance(o.get('site'), str) or len(o['status']) > 30 or len(o['site']) > 30:
             raise ValueError('导入订单状态不正确')
+        if 'guest' in o and (not isinstance(o['guest'], str) or len(o['guest']) > 60):
+            raise ValueError('导入订单姓名不正确')
         if 'manualIgnored' in o and type(o['manualIgnored']) is not bool:
             raise ValueError('导入订单人工核对状态不正确')
         if 'manual' in o and type(o['manual']) is not bool:

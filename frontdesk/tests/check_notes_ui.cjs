@@ -16,7 +16,7 @@ const path=require('node:path');
     await page.getByLabel('备注（选填）',{exact:true}).fill('今晚较晚到店\n加一床被子');
     await page.screenshot({path:path.join(__dirname,'../test-artifacts/notes-create.png')});
     await page.locator('#checkinForm button[type=submit]').click();await closed();
-    assert.equal(await page.locator('[data-room="8306"] .note-indicator').innerText(),'有备注');
+    assert.equal(await page.locator('[data-room="8306"] .room-note').innerText(),'今晚较晚到店 加一床被子');
     assert.equal(await page.locator('#onlineTotal').innerText(),'¥288.00');
     await page.reload();await page.locator('[data-room="8306"]').click();
     assert.equal(await page.locator('.stay-notes p').innerText(),'今晚较晚到店\n加一床被子');

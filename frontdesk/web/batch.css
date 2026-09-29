@@ -20,6 +20,8 @@
 .notes-label textarea::placeholder{color:#a0ab97}
 .notes-label textarea:focus-visible{outline:2px solid #a1bca1;outline-offset:1px}
 .room .note-indicator{font-size:10px;border-radius:4px;background:#f5edcd;color:#806c33;padding:2px 7px}
+.room .room-note{display:block;max-width:100%;padding:4px 7px;border-radius:5px;background:#fff0c8;color:#5c481c;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.move-options{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:18px}.move-options button{padding:14px;border:1px solid #bcdabb;border-radius:8px;background:#edf7e9;color:#24513f;font-weight:700}.move-options p{grid-column:1/-1;font-size:13px;color:#8b6f55}
 .stay-notes{background:#f7f5ec;border-radius:8px;padding:12px;margin-top:18px}
 .stay-notes>span{font-size:11px;color:#94845f}
 .stay-notes p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;line-height:1.8;margin:6px 0 0;color:#625d47}

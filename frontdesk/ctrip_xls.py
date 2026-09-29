@@ -206,8 +206,10 @@ def parse_export(encoded):
     if any(headers.count(name) != 1 for name in EXPECTED):
         raise ValueError('订单表缺少订单号、房型、日期、房间数或状态列')
     index = {name: headers.index(name) for name in EXPECTED}
+    if '客人姓名' in headers:
+        index['客人姓名'] = headers.index('客人姓名')
     orders = []
-    seen = set()
+    seen = {}
     for row_no, row in enumerate(rows[1:], 2):
         get = lambda name: str(row[index[name]] if index[name] < len(row) else '').strip()
         raw_id = get('订单号')
@@ -215,9 +217,8 @@ def parse_export(encoded):
             continue
         numeric = re.fullmatch(r'(\d{12,20})[^\d]*', raw_id)
         order_id = numeric.group(1) if numeric else raw_id
-        if len(order_id) > 100 or order_id in seen:
-            raise ValueError(f'订单表第 {row_no} 行的订单号为空、过长或重复')
-        seen.add(order_id)
+        if len(order_id) > 100:
+            raise ValueError(f'订单表第 {row_no} 行的订单号过长')
         product, status, site = get('房型名称'), get('订单状态'), get('预订网站')
         if not product or len(product) > 120 or len(status) > 30 or len(site) > 30:
             raise ValueError(f'订单表第 {row_no} 行的房型或状态不正确')
@@ -231,8 +232,17 @@ def parse_export(encoded):
             raise ValueError(f'订单表第 {row_no} 行的房间数或住宿日期超出范围')
         if not status or not site or len(order_id) < 4 or not all(ch.isprintable() for ch in order_id):
             raise ValueError(f'订单表第 {row_no} 行的订单号、状态或网站不正确')
-        orders.append(dict(id=order_id, product=product, site=site, status=status,
-                           start=start.isoformat(), end=end.isoformat(), quantity=quantity))
+        guest = get('客人姓名') if '客人姓名' in headers else ''
+        if len(guest) > 60 or any(not ch.isprintable() for ch in guest):
+            raise ValueError(f'订单表第 {row_no} 行的客人姓名格式不正确')
+        order = dict(id=order_id, product=product, site=site, status=status,
+                     start=start.isoformat(), end=end.isoformat(), quantity=quantity, guest=guest)
+        if order_id in seen:
+            if seen[order_id] != order:
+                raise ValueError(f'订单表第 {row_no} 行的订单号重复，但内容不同，请在携程核对后重新导出')
+            continue
+        seen[order_id] = order
+        orders.append(order)
     if not orders or len(orders) > 5000:
         raise ValueError('订单表没有有效订单或订单数量过多')
     return orders

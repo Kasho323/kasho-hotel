@@ -49,7 +49,7 @@
     return '';
   }
   function openImport(){
-    open(head('导入携程订单')+`<div class="modal-body"><p class="batch-note">选择携程 eBooking 导出的原始 .xls 文件。先预览并核对房型，确认后才保存。重复导入按订单号更新，不重复占房。</p><label class="ota-file">订单文件 <input id="otaFile" type="file" accept=".xls" aria-label="携程订单文件"></label><div id="otaError" class="error hidden"></div><div id="otaImportPreview"></div></div>`);
+    open(head('导入携程订单')+`<div class="modal-body"><p class="batch-note">选择携程 eBooking 导出的原始 .xls 文件。先核对房型，再导入并自动分配可用房号。姓名会写在房间备注上；同一订单号重复导入不会新增占房。</p><label class="ota-file">订单文件 <input id="otaFile" type="file" accept=".xls" aria-label="携程订单文件"></label><div id="otaError" class="error hidden"></div><div id="otaImportPreview"></div></div>`);
     get('#otaFile').addEventListener('change',async e=>{
       const file=e.target.files[0];if(!file)return;
       if(file.size>10_000_000){message('订单文件最多 10 MB');return;}
@@ -57,12 +57,12 @@
       try{
         const base64=await new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(String(reader.result).split(',')[1]);reader.onerror=reject;reader.readAsDataURL(file);});
         const preview=await api('ota-preview',{file:base64});
-        get('#otaImportPreview').innerHTML=`<div class="ota-preview-summary"><strong>文件共 ${preview.count} 笔订单</strong><span>新增 ${preview.new} · 系统已有 ${preview.existing} · 共 ${preview.roomNights} 间夜</span><small>日期 ${esc(preview.firstDate)} 至 ${esc(preview.lastDate)}。系统旧订单有 ${preview.notInFile} 笔未出现在此文件，仍会保留，请核对取消情况。</small><small>预订网站：${Object.entries(preview.sites).map(([site,n])=>esc(site)+' '+n).join('、')}；订单状态：${Object.entries(preview.statuses).map(([status,n])=>esc(status)+' '+n).join('、')}</small></div><div class="ota-mappings"><h3>核对携程房型对应</h3>${Object.entries(preview.products).map(([product,n],i)=>`<label>${esc(product)}（${n} 笔）<select data-product="${i}" aria-label="${esc(product)} 对应房型"><option value="">请选择</option>${kinds.map(kind=>`<option value="${kind}" ${suggested(product)===kind?'selected':''}>${kind}</option>`).join('')}</select></label>`).join('')}</div><label class="ota-confirm"><input type="checkbox" id="otaMappingConfirmed"> 我已核对房型对应与导出范围</label><button id="otaCommit" class="ota-primary">确认导入</button><p class="batch-note">导入订单仅占房量，不自动记入房费或判断是否已付款。已手工登记过的携程订单，请导入后关联原房号，避免重复占房。</p>`;
+        get('#otaImportPreview').innerHTML=`<div class="ota-preview-summary"><strong>文件共 ${preview.count} 笔不同订单</strong><span>新增 ${preview.new} · 系统已有 ${preview.existing} · 共 ${preview.roomNights} 间夜</span><small>日期 ${esc(preview.firstDate)} 至 ${esc(preview.lastDate)}。系统旧订单有 ${preview.notInFile} 笔未出现在此文件，仍会保留，请核对取消情况。</small><small>预订网站：${Object.entries(preview.sites).map(([site,n])=>esc(site)+' '+n).join('、')}；订单状态：${Object.entries(preview.statuses).map(([status,n])=>esc(status)+' '+n).join('、')}</small></div><div class="ota-mappings"><h3>核对携程房型对应</h3>${Object.entries(preview.products).map(([product,n],i)=>`<label>${esc(product)}（${n} 笔）<select data-product="${i}" aria-label="${esc(product)} 对应房型"><option value="">请选择</option>${kinds.map(kind=>`<option value="${kind}" ${suggested(product)===kind?'selected':''}>${kind}</option>`).join('')}</select></label>`).join('')}</div><label class="ota-confirm"><input type="checkbox" id="otaMappingConfirmed"> 我已核对房型对应与导出范围</label><button id="otaCommit" class="ota-primary">导入并自动分房</button><p class="batch-note">自动分房只处理尚未入住、没有冲突的订单。已手工登记但没关联的房间会留给你核对，不会再生成一间。导入不自动填写房费或付款状态，请之后核对金额。</p>`;
         const products=Object.keys(preview.products);
         get('#otaCommit').addEventListener('click',()=>{
           const mapping=Object.fromEntries([...get('#otaImportPreview').querySelectorAll('[data-product]')].map(el=>[products[Number(el.dataset.product)],el.value]));
           if(!get('#otaMappingConfirmed').checked||Object.values(mapping).some(value=>!value)){message('请先逐项核对房型，并勾选确认');return;}
-          change('ota-import',{file:base64,mapping},()=>{showToast(`已导入 ${preview.count} 笔订单`);openOrders();});
+          change('ota-import',{file:base64,mapping},()=>{const result=state.otaLastImportResult||{};showToast(`订单 ${result.orders||preview.count} 笔，自动分房 ${result.assigned||0} 间，待核对 ${result.skipped||0} 间`);openOrders();});
         });
       }catch(error){get('#otaImportPreview').textContent='';message(error.message);}
     });

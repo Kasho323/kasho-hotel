@@ -179,6 +179,11 @@ def change_quick_booking(s, old, action, data):
         if 'paymentStatus' in data or 'paymentStatus' in old:
             note += f' · 房费 ¥{charge/100:.2f} · {payment_status}（仅登记，不执行实际收退款）'
     validate_booking(b)
+    if b.get('otaOrderId') and b['status'] != '已取消':
+        order = next((o for o in s.get('otaOrders', []) if o['id'] == b['otaOrderId']), None)
+        if order and active_order(order) and (ROOM_TYPE[b['room']] != order['kind'] or b['start'] != order['start']
+                                               or b['end'] != order['end'] or b['channel'] != ('美团' if order['site'] == '美团' else '携程')):
+            raise ValueError('已关联的平台订单房型、日期或渠道不匹配；请先核对订单或解除关联')
     return b, note
 
 
@@ -198,6 +203,49 @@ def import_preview(state, encoded):
         'lastDate': max(o['end'] for o in orders),
         'roomNights': sum(o['quantity'] * (day(o['end']) - day(o['start'])).days for o in orders if active_order(o)),
     }
+
+
+def auto_assign_orders(state, imported_ids):
+    """Assign only unambiguous future OTA stays; never displace a local booking."""
+    assigned = skipped = 0
+    orders = sorted((o for o in state['otaOrders'] if o['id'] in imported_ids and active_order(o) and o['end'] > today()),
+                    key=lambda o: (o['start'], o['id']))
+    for order in orders:
+        if order['start'] < today():
+            skipped += order['quantity']
+            continue
+        related = [b for b in state['bookings'] if b.get('otaOrderId') == order['id'] and not b.get('deletedAt') and b['status'] != '已取消']
+        valid = [b for b in related if b['start'] == order['start'] and b['end'] == order['end'] and b['room'] in ROOMS[order['kind']]]
+        remaining = max(0, order['quantity'] - len(valid))
+        if not remaining:
+            continue
+        channel = '美团' if order['site'] == '美团' else '携程'
+        # A changed platform order or a manually entered, unlinked stay needs human matching.
+        if len(valid) != len(related) or any(
+            not b.get('deletedAt') and b['status'] != '已取消' and not b.get('otaOrderId')
+            and b['channel'] == channel and b['room'] in ROOMS[order['kind']]
+            and b['start'] == order['start'] and b['end'] == order['end']
+            for b in state['bookings']
+        ):
+            skipped += remaining
+            continue
+        for _ in range(remaining):
+            booking = dict(id=state['nextId'], room='', channel=channel, status='预订',
+                           guest='未留姓名', phone='', reference='', notes=order.get('guest') or '姓名待核对',
+                           start=order['start'], end=order['end'], rate=0, total=0, created=now(),
+                           quick=True, guestPaid=0, paymentStatus='未付', roomCharge=0,
+                           otaOrderId=order['id'], autoAssigned=True)
+            target = next((room for room in ROOMS[order['kind']]
+                           if not collision(state['bookings'], dict(booking, room=room))), None)
+            if not target:
+                skipped += 1
+                continue
+            booking['room'] = target
+            validate_booking(booking)
+            state['bookings'].append(booking)
+            state['nextId'] += 1
+            assigned += 1
+    return assigned, skipped
 
 
 def served_state(state):
@@ -284,6 +332,21 @@ class Store:
                 # Guest-paid amount is recorded on the stay, not as hotel cash received.
                 # In particular, an OTA guest payment is not a platform settlement.
                 note = f'{b["status"]} · {room} · {start} 起 {duration} 晚 · {channel} · 房费 ¥{amount/100:.2f} · {payment_status}'
+            elif action == 'quick-move':
+                b = next((b for b in s['bookings'] if b['id'] == data.get('bookingId')), None)
+                target = data.get('room')
+                if not b or b.get('deletedAt') or b['status'] != '预订' or b['start'] < today():
+                    raise ValueError('只能给尚未入住的预订换房；已入住记录请逐条核对')
+                if target not in ROOM_TYPE or ROOM_TYPE[target] != ROOM_TYPE[b['room']] or target == b['room']:
+                    raise ValueError('请选择同房型的另一间房')
+                source = b['room']
+                moved = dict(b, room=target, updatedAt=now())
+                clash = collision(s['bookings'], moved)
+                if clash:
+                    raise ValueError(f'{target} 在该订单住宿期间已有记录，请选择其他房间')
+                b['room'] = target
+                b['updatedAt'] = moved['updatedAt']
+                note = f'预订换房 #{b["id"]} · {source}→{target} · {b["start"]} 至 {b["end"]}'
             elif action in ['quick-edit', 'quick-delete', 'quick-restore', 'quick-batch']:
                 batch = action == 'quick-batch'
                 operation = data.get('operation') if batch else action.removeprefix('quick-')
@@ -332,8 +395,11 @@ class Store:
                     else:
                         s['otaOrders'].append(proposed)
                         added += 1
+                assigned, skipped = auto_assign_orders(s, {o['id'] for o in orders})
                 s['otaLastImportAt'] = now()
-                note = f'导入携程订单 {len(orders)} 笔，新增 {added}、更新 {changed}；文件未出现的旧订单保留，需人工核对取消'
+                s['otaLastImportResult'] = {'orders': len(orders), 'new': added, 'changed': changed,
+                                            'assigned': assigned, 'skipped': skipped}
+                note = f'导入携程订单 {len(orders)} 笔，新增 {added}、更新 {changed}；自动分房 {assigned} 间、待人工核对 {skipped} 间；文件未出现的旧订单保留'
             elif action == 'ota-manual':
                 raw_id = bounded_text(data.get('orderId', ''), 80)
                 kind, start, end, quantity, status = data.get('kind'), data.get('start'), data.get('end'), data.get('quantity'), data.get('status', '已接单')

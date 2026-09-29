@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from datetime import timedelta
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from ctrip_xls import parse_export
@@ -84,6 +85,56 @@ class OtaTest(unittest.TestCase):
         s = self.write('quick-cancel', bookingId=1)
         self.assertEqual(snapshot(s, start, '高级观景', ROOMS)['free'], 1)
 
+    def test_move_future_booking_preserves_details_and_checks_full_stay(self):
+        start = self.date(1)
+        s = self.write('quick-in', room='8302', channel='携程', amount='398', paymentStatus='未付',
+                       date=start, nights=2, notes='张先生')
+        booking_id = s['bookings'][0]['id']
+        self.write('quick-in', room='8802', channel='线下', amount='190', date=self.date(2))
+        with self.assertRaises(ValueError):
+            self.write('quick-move', bookingId=booking_id, room='8802')
+        s = self.write('quick-move', bookingId=booking_id, room='8806')
+        moved = next(b for b in s['bookings'] if b['id'] == booking_id)
+        self.assertEqual((moved['room'], moved['notes'], moved['roomCharge'], moved['paymentStatus']),
+                         ('8806', '张先生', 39800, '未付'))
+        self.assertEqual(snapshot(s, self.date(2), '标准间', ROOMS)['free'], 2)
+        with self.assertRaises(ValueError):
+            self.write('quick-move', bookingId=booking_id, room='8308')
+
+    def test_import_assigns_name_once_and_skips_unlinked_manual_record(self):
+        start, end = self.date(2), self.date(3)
+        order = dict(id='123456789012', product='标准房', site='携程', status='已接单',
+                     start=start, end=end, quantity=1, guest='王先生')
+        with patch('server.parse_export', return_value=[order]):
+            s = self.write('ota-import', file='test', mapping={'标准房': '标准间'})
+            self.assertEqual(s['otaLastImportResult']['assigned'], 1)
+            self.assertEqual(s['bookings'][0]['notes'], '王先生')
+            self.assertEqual(s['bookings'][0]['otaOrderId'], order['id'])
+            self.assertEqual(s['bookings'][0]['status'], '预订')
+            self.assertEqual(s['bookings'][0]['roomCharge'], 0)
+            s = self.write('ota-import', file='test', mapping={'标准房': '标准间'})
+            self.assertEqual(len(s['otaOrders']), 1)
+            self.assertEqual(len(s['bookings']), 1)
+            self.assertEqual(s['otaLastImportResult']['assigned'], 0)
+        self.write('quick-in', room='8802', channel='携程', amount='200', date=self.date(4))
+        other = dict(order, id='123456789013', start=self.date(4), end=self.date(5), guest='李先生')
+        with patch('server.parse_export', return_value=[other]):
+            s = self.write('ota-import', file='test', mapping={'标准房': '标准间'})
+        self.assertEqual(s['otaLastImportResult']['assigned'], 0)
+        self.assertEqual(s['otaLastImportResult']['skipped'], 1)
+        self.assertEqual(len(s['bookings']), 2)
+
+    def test_identical_duplicate_rows_collapse_but_conflicting_rows_reject(self):
+        headers = ['订单号', '订单状态', '房型名称', '入住日期', '离店日期', '房间数', '预订网站', '客人姓名']
+        row = ['123456789012', '已接单', '标准房', '2026年10月01日', '2026年10月02日', 1, '携程', '王先生']
+        with patch('ctrip_xls.read_cells', return_value=[headers, row, row.copy()]):
+            self.assertEqual(len(parse_export(base64.b64encode(b'test').decode())), 1)
+        changed = row.copy()
+        changed[5] = 2
+        with patch('ctrip_xls.read_cells', return_value=[headers, row, changed]):
+            with self.assertRaisesRegex(ValueError, '内容不同'):
+                parse_export(base64.b64encode(b'test').decode())
+
     @unittest.skipUnless(SAMPLE is not None and SAMPLE.exists(), 'sample export is not available')
     def test_real_export_inventory_idempotency_and_link(self):
         encoded = base64.b64encode(SAMPLE.read_bytes()).decode()
@@ -92,23 +143,23 @@ class OtaTest(unittest.TestCase):
         self.assertEqual({o['site'] for o in parsed}, {'携程', '去哪儿'})
         s = self.write('ota-import', file=encoded, mapping=MAPPING)
         self.assertEqual(len(s['otaOrders']), 22)
-        self.assertFalse(any('guest' in o for o in s['otaOrders']))
+        self.assertTrue(all(isinstance(o.get('guest'), str) for o in s['otaOrders']))
         self.assertEqual(snapshot(s, '2026-10-01', '标准间', ROOMS)['free'], 0)
         self.assertEqual(snapshot(s, '2026-10-01', '大床房', ROOMS)['free'], 0)
         Store.validate_backup(s)
         before = [(o['id'],o['quantity']) for o in s['otaOrders']]
+        booking_count = len(s['bookings'])
         s = self.write('ota-import', file=encoded, mapping=MAPPING)
         self.assertEqual([(o['id'],o['quantity']) for o in s['otaOrders']], before)
+        self.assertEqual(len(s['bookings']), booking_count)
         order = next(o for o in s['otaOrders'] if o['kind'] == '标准间' and o['start'] == '2026-09-30')
         with self.assertRaises(ValueError):
             self.write('quick-in', room='8302', channel='线下', amount='200', date=order['start'])
-        nights = (day(order['end']) - day(order['start'])).days
-        s = self.write('quick-in', room='8302', channel='携程', amount='200', paymentStatus='未付', date=order['start'], nights=nights, otaOrderId=order['id'])
+        self.assertTrue(any(b.get('otaOrderId') == order['id'] for b in s['bookings']))
         self.assertEqual(snapshot(s, order['start'], '标准间', ROOMS)['free'], 0)
-        self.assertEqual(s['bookings'][0]['otaOrderId'], order['id'])
         other = next(o for o in s['otaOrders'] if o['kind'] == '标准间' and o['start'] == '2026-09-30' and o['id'] != order['id'])
         s = self.write('ota-ignore', orderId=other['id'], ignored=True)
-        self.assertGreater(snapshot(s, '2026-09-30', '标准间', ROOMS)['free'], 0)
+        self.assertTrue(next(o for o in s['otaOrders'] if o['id'] == other['id'])['manualIgnored'])
         s = self.write('ota-import', file=encoded, mapping=MAPPING)
         self.assertTrue(next(o for o in s['otaOrders'] if o['id'] == other['id'])['manualIgnored'])
         s = self.write('ota-ignore', orderId=other['id'], ignored=False)
