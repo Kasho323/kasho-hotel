@@ -30,7 +30,7 @@ function render(){
   $('.overview>div>p').textContent=moneyReport.history?'点房号查看昨日记录；空房指当天未登记住宿的房间。':'点房号登记，按日期查看空房。';
   $('#rooms').innerHTML=Object.entries(state.rooms).map(([kind,rooms])=>{
     const free=rooms.filter(r=>!moneyReport.byRoom[r]),inventory=state.inventory?.[selected]?.[kind],netFree=inventory?Math.max(0,inventory.free):free.length;total+=netFree;
-    return `<div class="room-group"><div><div class="type-title"><h3>${esc(kind)}</h3><span>剩 <strong>${netFree}</strong> / ${rooms.length} 间</span></div><p class="free-list">${inventory?.unassigned?`平台订单待分房 ${inventory.unassigned} 间。`:''}${inventory?.free<0?`超订 ${-inventory.free} 间，请立即核对。`:''}${free.length?'可分配房号：'+free.join('、'):'暂无空房'}</p></div><div class="room-list">${rooms.map(room=>{const b=moneyReport.byRoom[room],rows=moneyReport.roomRows[room],fee=KashoMoney.totals(state,rows,selected).total,held=!b&&!moneyReport.history&&inventory?.unassigned>0&&inventory.free<=0,note=rows.find(row=>row.notes)?.notes,pending=b?.autoAssigned&&fee===0;return `<button class="room ${b?'occupied '+roomColor(rows):held?'unassigned-hold':''}" data-room="${room}" aria-label="${room} ${b?esc(b.channel)+' 已占用':held?'待分房':'空房'}${note?'，备注 '+esc(note):''}"><strong>${room}</strong><span>${b?(b.status==='停用'?'停用':rows.length>1?rows.length+' 条记录':esc(b.channel)+' · '+(b.status==='预订'?'已预订':paymentLabel(b))):(moneyReport.history?'无记录':held?'待分房':'空房 ＋')}</span>${note?`<span class="room-note" title="${esc(note)}">${esc(note)}</span>`:''}${b&&b.status!=='停用'?`<small data-cents="${fee}" data-channel="${rows.length===1?esc(b.channel):'混合'}" title="所选日房费（含未付）；点房号查看明细">${pending?'房费待录入':yuan(fee)}</small>${b.status==='预订'?`<span class="payment-sub">${pending?'付款待核对':paymentLabel(b)}</span>`:''}`:''}</button>`;}).join('')}</div></div>`;
+    return `<div class="room-group"><div><div class="type-title"><h3>${esc(kind)}</h3><span>剩 <strong>${netFree}</strong> / ${rooms.length} 间</span></div><p class="free-list">${inventory?.unassigned?`平台订单待分房 ${inventory.unassigned} 间。<button class="pending-manage" data-pending-kind="${esc(kind)}">查看 / 取消</button>`:''}${inventory?.free<0?`超订 ${-inventory.free} 间，请立即核对。`:''}${free.length?'可分配房号：'+free.join('、'):'暂无空房'}</p></div><div class="room-list">${rooms.map(room=>{const b=moneyReport.byRoom[room],rows=moneyReport.roomRows[room],fee=KashoMoney.totals(state,rows,selected).total,held=!b&&!moneyReport.history&&inventory?.unassigned>0&&inventory.free<=0,note=rows.find(row=>row.notes)?.notes,pending=b?.autoAssigned&&fee===0;return `<button class="room ${b?'occupied '+roomColor(rows):held?'unassigned-hold':''}" data-room="${room}" aria-label="${room} ${b?esc(b.channel)+' 已占用':held?'待分房':'空房'}${note?'，备注 '+esc(note):''}"><strong>${room}</strong><span>${b?(b.status==='停用'?'停用':rows.length>1?rows.length+' 条记录':esc(b.channel)+' · '+(b.status==='预订'?'已预订':paymentLabel(b))):(moneyReport.history?'无记录':held?'待分房':'空房 ＋')}</span>${note?`<span class="room-note" title="${esc(note)}">${esc(note)}</span>`:''}${b&&b.status!=='停用'?`<small data-cents="${fee}" data-channel="${rows.length===1?esc(b.channel):'混合'}" title="所选日房费（含未付）；点房号查看明细">${pending?'房费待录入':yuan(fee)}</small>${b.status==='预订'?`<span class="payment-sub">${pending?'付款待核对':paymentLabel(b)}</span>`:''}`:''}</button>`;}).join('')}</div></div>`;
   }).join('');
   $('#freeCount').textContent=total;
   $('#onlineTotal').textContent=yuan(online);$('#offlineTotal').textContent=yuan(offline);$('#dailyTotal').textContent=yuan(online+offline);
@@ -68,7 +68,7 @@ function openRoom(room){
     $('#moveBooking')?.addEventListener('click',()=>openMove(b.id));
     $('#checkout')?.addEventListener('click',()=>save('quick-out',{bookingId:b.id},room+' 已恢复空房'));
     $('#arrive')?.addEventListener('click',()=>save('quick-arrive',{bookingId:b.id},room+' 已确认到店'));
-    $('#cancelBooking')?.addEventListener('click',()=>{if(confirm('取消这笔预订？已付款记录会保留，退款请自行核对。'))save('quick-cancel',{bookingId:b.id},room+' 已取消预订');});
+    $('#cancelBooking')?.addEventListener('click',()=>{if(confirm('取消这笔预订？会同步释放关联平台订单在本机占用的房量；不会取消平台订单或执行退款。'))save('quick-cancel',{bookingId:b.id},room+' 已取消预订');});
     const edit=document.createElement('button');edit.textContent='编辑';edit.id='editBooking';edit.addEventListener('click',()=>openEdit(b.id));$('.modal-foot').firstElementChild.replaceWith(edit);
     if(b.status!=='停用'){$('.stay-info>span').textContent=b.channel+' · 整单房费';const p=document.createElement('p');p.className='payment-summary';p.textContent=b.autoAssigned&&amount(b)===0?'导入后自动分房：请核对房费和实际付款状态':`${paymentLabel(b)} · 客人已付 ${yuan(KashoMoney.paid(state,b))} · 待付 ${yuan(paymentLabel(b)==='未付'?amount(b):0)}`;$('#formError').before(p);}
     if(b.notes){const note=document.createElement('div');note.className='stay-notes';note.innerHTML='<span>备注</span><p></p>';note.querySelector('p').textContent=b.notes;$('#formError').before(note);}
@@ -79,13 +79,19 @@ function openRoom(room){
     if(selected>state.today)$('#checkinForm button[type=submit]').textContent='保存预订';
     $('#formError').insertAdjacentHTML('beforebegin',notesField());
     $('.amount-label').textContent='房费金额（整单）';$('.amount-label').insertAdjacentHTML('beforebegin',paymentField());
+    let priceEdited=false;
+    const defaultPrice=()=>{if(!priceEdited)$('#paidAmount').value=((state.defaultRates?.[kind]||0)*Number($('[name=nights]').value)/100).toFixed(2);};
+    $('#paidAmount').addEventListener('input',()=>{priceEdited=true;});
+    $('[name=nights]').addEventListener('change',defaultPrice);defaultPrice();
     window.KashoOta?.decorateCheckin(room,selected,kind);
     $('#checkinForm').addEventListener('submit',e=>{e.preventDefault();const data=Object.fromEntries(new FormData(e.target));save('quick-in',{room,...data,date:selected,nights:Number(data.nights)},room+(selected===state.today?' 入住成功':' 预订已保存'));});
   }
   if(!modal.open)modal.showModal();
 }
 function openMove(id){
-  const b=state.bookings.find(row=>row.id===id);if(!b)return;
+  const original=state.bookings.find(row=>row.id===id);if(!original)return;
+  const order=state.otaOrders?.find(o=>o.id===original.otaOrderId&&!o.manualIgnored&&!['已取消','已关闭','已撤销','取消','关闭'].includes(o.status));
+  const b=order?{...original,start:order.start,end:order.end}:original;
   const kind=Object.keys(state.rooms).find(name=>state.rooms[name].includes(b.room));
   const choices=state.rooms[kind].filter(room=>room!==b.room&&!state.bookings.some(other=>other.id!==b.id&&!other.deletedAt&&other.status!=='已取消'&&other.room===room&&other.start<b.end&&b.start<(other.releasedOn&&other.releasedOn<other.end?other.releasedOn:other.end)));
   dialogRevision=state.revision;modal.classList.remove('records-modal');

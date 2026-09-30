@@ -13,6 +13,11 @@ def active_order(order):
     return order['status'] not in CANCELLED and not order.get('manualIgnored', False)
 
 
+def order_quantity(order):
+    """A local cancellation survives reimport of an older platform export."""
+    return min(order['quantity'], order.get('localQuantityCap', order['quantity'])) if active_order(order) else 0
+
+
 def occupied_end(booking):
     return min(booking['end'], booking['releasedOn']) if booking.get('releasedOn') else booking['end']
 
@@ -29,8 +34,10 @@ def snapshot(state, current, kind, rooms):
     contributors = [('local', b['id'], b['room'], b['start'], occupied_end(b), b['status'], b.get('otaOrderId', '')) for b in local]
     for order in orders:
         linked = sum(b.get('otaOrderId') == order['id'] for b in local)
-        unassigned += max(0, order['quantity'] - linked)
-        contributors.append(('ota', order['id'], order['site'], order['start'], order['end'], order['quantity'], order['status']))
+        completed = sum(b.get('otaOrderId') == order['id'] and not b.get('deletedAt')
+                        and b['status'] == '已退房' and occupied_end(b) <= current for b in state['bookings'])
+        unassigned += max(0, order_quantity(order) - linked - completed)
+        contributors.append(('ota', order['id'], order['site'], order['start'], order['end'], order_quantity(order), order['status']))
     physical = len(rooms[kind]) - len(local_rooms)
     free = physical - unassigned
     digest = hashlib.sha256(json.dumps(sorted(contributors, key=str), ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()[:16]
@@ -113,6 +120,8 @@ def validate_imported(state, rooms):
             raise ValueError('手工平台订单标记不正确')
         if type(o.get('quantity')) is not int or not 1 <= o['quantity'] <= 13:
             raise ValueError('导入订单间数不正确')
+        if 'localQuantityCap' in o and (type(o['localQuantityCap']) is not int or not 0 <= o['localQuantityCap'] <= 13):
+            raise ValueError('人工保留间数不正确')
         if not 1 <= (date.fromisoformat(o['end']) - date.fromisoformat(o['start'])).days <= 365:
             raise ValueError('导入订单日期不正确')
     for b in state['bookings']:

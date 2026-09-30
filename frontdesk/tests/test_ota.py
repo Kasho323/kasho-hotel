@@ -81,8 +81,7 @@ class OtaTest(unittest.TestCase):
         self.assertEqual(s['bookings'][0]['channel'], '美团')
         Store.validate_backup(s)
         s = self.write('ota-manual', orderId='MT-100', kind='高级观景', start=start, end=end, quantity=1, status='已取消')
-        self.assertEqual(snapshot(s, start, '高级观景', ROOMS)['free'], 0)
-        s = self.write('quick-cancel', bookingId=1)
+        self.assertEqual(s['bookings'][0]['status'], '已取消')
         self.assertEqual(snapshot(s, start, '高级观景', ROOMS)['free'], 1)
 
     def test_move_future_booking_preserves_details_and_checks_full_stay(self):
@@ -111,7 +110,7 @@ class OtaTest(unittest.TestCase):
             self.assertEqual(s['bookings'][0]['notes'], '王先生')
             self.assertEqual(s['bookings'][0]['otaOrderId'], order['id'])
             self.assertEqual(s['bookings'][0]['status'], '预订')
-            self.assertEqual(s['bookings'][0]['roomCharge'], 0)
+            self.assertEqual(s['bookings'][0]['roomCharge'], 19624)
             s = self.write('ota-import', file='test', mapping={'标准房': '标准间'})
             self.assertEqual(len(s['otaOrders']), 1)
             self.assertEqual(len(s['bookings']), 1)

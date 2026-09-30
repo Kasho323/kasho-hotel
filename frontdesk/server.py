@@ -19,12 +19,13 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from ctrip_xls import parse_export
-from inventory import active_order, alerts as inventory_alerts, snapshot as inventory_snapshot, validate_imported, week_inventory
+from inventory import active_order, order_quantity, alerts as inventory_alerts, snapshot as inventory_snapshot, validate_imported, week_inventory
 
 ROOMS = {'标准间': ['8302', '8802', '8806', '8808'], '大床房': ['8306', '8308'], '高级观景': ['8801'], '舒适观景': ['8303', '8305', '8307', '8803', '8805', '8807']}
 ROOM_TYPE = {r: t for t, rooms in ROOMS.items() for r in rooms}
 CHANNELS = ['携程', '美团', '线下']
 STATUSES = ['预订', '在住', '已退房', '已取消', '停用']
+DEFAULT_RATES = {'标准间': 19624, '大床房': 17864, '高级观景': 28424, '舒适观景': 26664}
 
 def today():
     return date.today().isoformat()
@@ -56,6 +57,9 @@ def bounded_text(value, limit):
     return value.strip()
 
 def validate_booking(b):
+    for marker in ('autoAssigned', 'autoPriced'):
+        if marker in b and type(b[marker]) is not bool:
+            raise ValueError('自动分房或自动房价标记不正确')
     if b.get('room') not in ROOM_TYPE or b.get('channel') not in CHANNELS or b.get('status') not in STATUSES:
         raise ValueError('房间、渠道或状态不正确')
     nights = (day(b['end']) - day(b['start'])).days
@@ -179,9 +183,15 @@ def change_quick_booking(s, old, action, data):
         if 'paymentStatus' in data or 'paymentStatus' in old:
             note += f' · 房费 ¥{charge/100:.2f} · {payment_status}（仅登记，不执行实际收退款）'
     validate_booking(b)
-    if b.get('otaOrderId') and b['status'] != '已取消':
+    if 'amount' in data and money(data['amount']) != old.get('roomCharge', old.get('total', 0)):
+        b['autoPriced'] = False
+    if data.get('paymentStatus') == '已付':
+        b['autoPriced'] = False
+    if b.get('otaOrderId') and b['status'] != '已取消' and not b.get('deletedAt'):
         order = next((o for o in s.get('otaOrders', []) if o['id'] == b['otaOrderId']), None)
-        if order and active_order(order) and (ROOM_TYPE[b['room']] != order['kind'] or b['start'] != order['start']
+        if order and (old.get('deletedAt') or old['status'] == '已取消') and not active_order(order):
+            raise ValueError('平台订单已停计或取消，请先在待入住订单核实并恢复')
+        if order and active_order(order) and any(b.get(k) != old.get(k) for k in ('room', 'start', 'end', 'channel', 'status')) and (ROOM_TYPE[b['room']] != order['kind'] or b['start'] != order['start']
                                                or b['end'] != order['end'] or b['channel'] != ('美团' if order['site'] == '美团' else '携程')):
             raise ValueError('已关联的平台订单房型、日期或渠道不匹配；请先核对订单或解除关联')
     return b, note
@@ -205,18 +215,96 @@ def import_preview(state, encoded):
     }
 
 
+def live_linked(state, order):
+    return [b for b in state['bookings'] if b.get('otaOrderId') == order['id']
+            and not b.get('deletedAt') and b['status'] != '已取消']
+
+
+def apply_default_price(booking, kind):
+    charge = DEFAULT_RATES[kind] * (day(booking['end']) - day(booking['start'])).days
+    booking.update(rate=DEFAULT_RATES[kind], total=charge, roomCharge=charge, autoPriced=True,
+                   guestPaid=charge if booking.get('paymentStatus') == '已付' else 0)
+
+
+def reconcile_orders(state, order_ids):
+    """Synchronize reservation slots and repair truncated stays without moving occupants."""
+    for order in state.get('otaOrders', []):
+        if order['id'] not in order_ids or order['end'] <= today():
+            continue
+        order.pop('assignmentIssue', None)
+        related = live_linked(state, order)
+        excess = max(0, len(related) - order_quantity(order))
+        # Import changes must never silently erase actual in-house or historical stays.
+        for b in sorted(related, key=lambda b: b['id'], reverse=True):
+            if excess and b['status'] == '预订':
+                b.update(status='已取消', updatedAt=now(), otaCancellationReason='平台订单取消或减少间数')
+                excess -= 1
+        if excess:
+            order['assignmentIssue'] = '平台取消或减房，但有已入住/已退房记录，请核对；未自动删除真实住宿。'
+        if not order_quantity(order):
+            continue
+        for b in live_linked(state, order):
+            if b['status'] == '已退房':
+                continue
+            candidate = dict(b)
+            matches = b['room'] in ROOMS[order['kind']] and b['channel'] == ('美团' if order['site'] == '美团' else '携程')
+            if b['start'] != order['start'] or b['end'] != order['end'] or not matches:
+                safe = matches and (b['status'] == '预订' or
+                       (b['status'] == '在住' and b['start'] == order['start'] and b['end'] < order['end']))
+                candidate.update(start=order['start'], end=order['end'])
+                if not safe or collision(state['bookings'], candidate):
+                    order['assignmentIssue'] = f'{b["room"]} 未能覆盖订单全部日期，请换房或核对已有记录；未覆盖日期仍保留房量。'
+                    continue
+            legacy_zero = b.get('autoAssigned') and b.get('roomCharge') == 0 and b.get('paymentStatus') == '未付' and 'autoPriced' not in b and not b.get('updatedAt')
+            if b.get('autoPriced') or legacy_zero:
+                apply_default_price(candidate, order['kind'])
+            validate_booking(candidate)
+            if candidate != b:
+                candidate['updatedAt'] = now()
+                b.update(candidate)
+
+
+def sync_local_cancellations(state, before):
+    """Cancel/delete/restore a room and its OTA slot together, including batch edits."""
+    old_by_id = {b['id']: b for b in before['bookings']}
+    for order in state['otaOrders']:
+        delta = 0
+        for b in state['bookings']:
+            old = old_by_id.get(b['id'])
+            if not old or b.get('otaOrderId') != order['id']:
+                continue
+            old_live = not old.get('deletedAt') and old['status'] != '已取消'
+            new_live = not b.get('deletedAt') and b['status'] != '已取消'
+            delta += int(new_live) - int(old_live)
+        if delta:
+            order['localQuantityCap'] = max(0, min(order['quantity'], order_quantity(order) + delta))
+            if delta > 0 and len(live_linked(state, order)) > order_quantity(order):
+                raise ValueError('恢复后超过平台订单有效间数，请先核对订单保留间数')
+
+
+def upgrade_ota_rules(state):
+    if state.get('otaRulesVersion', 0) >= 2:
+        return False
+    for order in state.get('otaOrders', []):
+        cancelled = sum(b.get('otaOrderId') == order['id'] and (bool(b.get('deletedAt')) or b['status'] == '已取消')
+                        for b in state['bookings'])
+        if cancelled and 'localQuantityCap' not in order:
+            order['localQuantityCap'] = max(0, order['quantity'] - cancelled)
+    reconcile_orders(state, {o['id'] for o in state.get('otaOrders', [])})
+    state['otaRulesVersion'] = 2
+    return True
+
+
 def auto_assign_orders(state, imported_ids):
-    """Assign only unambiguous future OTA stays; never displace a local booking."""
+    """Assign each room for every night, including already-started unambiguous stays."""
+    reconcile_orders(state, imported_ids)
     assigned = skipped = 0
     orders = sorted((o for o in state['otaOrders'] if o['id'] in imported_ids and active_order(o) and o['end'] > today()),
                     key=lambda o: (o['start'], o['id']))
     for order in orders:
-        if order['start'] < today():
-            skipped += order['quantity']
-            continue
-        related = [b for b in state['bookings'] if b.get('otaOrderId') == order['id'] and not b.get('deletedAt') and b['status'] != '已取消']
-        valid = [b for b in related if b['start'] == order['start'] and b['end'] == order['end'] and b['room'] in ROOMS[order['kind']]]
-        remaining = max(0, order['quantity'] - len(valid))
+        related = live_linked(state, order)
+        valid = [b for b in related if b['status'] == '已退房' or (b['start'] == order['start'] and b['end'] == order['end'] and b['room'] in ROOMS[order['kind']])]
+        remaining = max(0, order_quantity(order) - len(valid))
         if not remaining:
             continue
         channel = '美团' if order['site'] == '美团' else '携程'
@@ -227,6 +315,7 @@ def auto_assign_orders(state, imported_ids):
             and b['start'] == order['start'] and b['end'] == order['end']
             for b in state['bookings']
         ):
+            order.setdefault('assignmentIssue', '有同日期同房型的手工记录，请先关联原记录，避免重复分房。')
             skipped += remaining
             continue
         for _ in range(remaining):
@@ -235,9 +324,11 @@ def auto_assign_orders(state, imported_ids):
                            start=order['start'], end=order['end'], rate=0, total=0, created=now(),
                            quick=True, guestPaid=0, paymentStatus='未付', roomCharge=0,
                            otaOrderId=order['id'], autoAssigned=True)
+            apply_default_price(booking, order['kind'])
             target = next((room for room in ROOMS[order['kind']]
                            if not collision(state['bookings'], dict(booking, room=room))), None)
             if not target:
+                order['assignmentIssue'] = '没有一间同房型房间能覆盖全部住宿晚数，请核对或调整房号后点“补全分房”。'
                 skipped += 1
                 continue
             booking['room'] = target
@@ -249,7 +340,7 @@ def auto_assign_orders(state, imported_ids):
 
 
 def served_state(state):
-    return dict(state, rooms=ROOMS, today=today(), app='kasho-frontdesk',
+    return dict(state, rooms=ROOMS, defaultRates=DEFAULT_RATES, today=today(), app='kasho-frontdesk',
                 inventory=week_inventory(state, today(), ROOMS), closureAlerts=inventory_alerts(state, today(), ROOMS))
 
 
@@ -264,8 +355,16 @@ class Store:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('CREATE TABLE IF NOT EXISTS state (id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)')
         state = {'schema': 1, 'revision': 0, 'bookings': [], 'payments': [], 'settings': {'reserve': {k: 0 for k in ROOMS}, 'rates': {k: 0 for k in ROOMS}}, 'overrides': {}, 'confirmed': {}, 'audit': [], 'nextId': 1, 'otaOrders': [], 'platformChecks': {}}
+        state['otaRulesVersion'] = 2
         self.db.execute('INSERT OR IGNORE INTO state VALUES (1, ?)', (json.dumps(state, ensure_ascii=False),))
         self.db.commit()
+        current = self.read()
+        if upgrade_ota_rules(current):
+            self.backup()
+            current['revision'] += 1
+            current['audit'].append({'at': now(), 'text': '升级订单房量规则：保留已取消间数，核对整段住宿日期与默认房费'})
+            with self.db:
+                self.db.execute('UPDATE state SET payload=? WHERE id=1', (json.dumps(current, ensure_ascii=False),))
 
     def read(self):
         with self.lock:
@@ -286,6 +385,7 @@ class Store:
     def write(self, action, data):
         with self.lock:
             s = self.read()
+            before = json.loads(json.dumps(s))
             if data.get('revision') != s['revision']:
                 raise ValueError('数据已在另一窗口更新，请刷新后再操作')
             s.setdefault('otaOrders', [])
@@ -304,7 +404,7 @@ class Store:
                     if not ota_order or not active_order(ota_order) or channel != expected_channel or ROOM_TYPE[room] != ota_order['kind'] or start != ota_order['start'] or (day(start) + timedelta(days=duration)).isoformat() != ota_order['end']:
                         raise ValueError('关联订单的房型、入住日期或住宿晚数不匹配')
                     linked = sum(b.get('otaOrderId') == ota_id and not b.get('deletedAt') and b['status'] != '已取消' for b in s['bookings'])
-                    if linked >= ota_order['quantity']:
+                    if linked >= order_quantity(ota_order):
                         raise ValueError('这笔携程订单的间数已经全部关联房号')
                 if type(duration) is not int or not (1 <= duration <= 7 or (ota_order and duration == (day(ota_order['end']) - day(ota_order['start'])).days)):
                     raise ValueError('请选择 1 到 7 晚，或使用导入订单的原住宿晚数')
@@ -335,17 +435,26 @@ class Store:
             elif action == 'quick-move':
                 b = next((b for b in s['bookings'] if b['id'] == data.get('bookingId')), None)
                 target = data.get('room')
-                if not b or b.get('deletedAt') or b['status'] != '预订' or b['start'] < today():
+                if not b or b.get('deletedAt') or b['status'] != '预订' or b['end'] <= today():
                     raise ValueError('只能给尚未入住的预订换房；已入住记录请逐条核对')
                 if target not in ROOM_TYPE or ROOM_TYPE[target] != ROOM_TYPE[b['room']] or target == b['room']:
                     raise ValueError('请选择同房型的另一间房')
                 source = b['room']
                 moved = dict(b, room=target, updatedAt=now())
+                linked_order = next((o for o in s['otaOrders'] if o['id'] == b.get('otaOrderId') and order_quantity(o)), None)
+                if linked_order:
+                    if ROOM_TYPE[target] != linked_order['kind']:
+                        raise ValueError('平台订单房型已变更，请先核对记录')
+                    moved.update(start=linked_order['start'], end=linked_order['end'])
+                    if moved.get('autoPriced'):
+                        apply_default_price(moved, linked_order['kind'])
+                validate_booking(moved)
                 clash = collision(s['bookings'], moved)
                 if clash:
                     raise ValueError(f'{target} 在该订单住宿期间已有记录，请选择其他房间')
-                b['room'] = target
-                b['updatedAt'] = moved['updatedAt']
+                b.update(moved)
+                if linked_order:
+                    reconcile_orders(s, {linked_order['id']})
                 note = f'预订换房 #{b["id"]} · {source}→{target} · {b["start"]} 至 {b["end"]}'
             elif action in ['quick-edit', 'quick-delete', 'quick-restore', 'quick-batch']:
                 batch = action == 'quick-batch'
@@ -389,9 +498,12 @@ class Store:
                     proposed = dict(o, kind=mapping[o['product']])
                     old = existing.get(o['id'])
                     if old:
+                        previous_quantity = order_quantity(old)
                         if any(old.get(k) != v for k, v in proposed.items()):
                             changed += 1
                         old.update(proposed)
+                        if order_quantity(old) < previous_quantity:
+                            old['localQuantityCap'] = order_quantity(old)
                     else:
                         s['otaOrders'].append(proposed)
                         added += 1
@@ -418,6 +530,7 @@ class Store:
                     old.update(proposed)
                 else:
                     s['otaOrders'].append(proposed)
+                reconcile_orders(s, {order_id})
                 note = f'手工{"修改" if old else "登记"}美团未来订单 · {kind} · {start} 至 {end} · {quantity} 间 · {status}'
             elif action == 'ota-link':
                 bid, order_id = data.get('bookingId'), data.get('orderId', '')
@@ -430,7 +543,7 @@ class Store:
                     if not order or not active_order(order) or ROOM_TYPE[b['room']] != order['kind'] or b['start'] != order['start'] or b['end'] != order['end'] or b['channel'] != expected_channel:
                         raise ValueError('房号与平台订单的房型、日期或渠道不一致')
                     linked = sum(x.get('otaOrderId') == order_id and x['id'] != bid and not x.get('deletedAt') and x['status'] != '已取消' for x in s['bookings'])
-                    if linked >= order['quantity']:
+                    if linked >= order_quantity(order):
                         raise ValueError('这笔订单的间数已经全部关联房号')
                     b['otaOrderId'] = order_id
                 else:
@@ -442,7 +555,25 @@ class Store:
                 if not order or type(ignored) is not bool:
                     raise ValueError('请选择需要更正的导入订单')
                 order['manualIgnored'] = ignored
+                if ignored:
+                    reconcile_orders(s, {order['id']})
+                else:
+                    auto_assign_orders(s, {order['id']})
                 note = f'携程导入订单 {order["id"]} · {"人工确认不计房量" if ignored else "恢复计入房量"}，请核对平台真实订单状态'
+            elif action in ['ota-quantity', 'ota-assign']:
+                order = next((o for o in s['otaOrders'] if o['id'] == data.get('orderId')), None)
+                if not order or not active_order(order):
+                    raise ValueError('订单已取消或停计，请先核对平台状态')
+                if action == 'ota-quantity':
+                    quantity = data.get('quantity')
+                    if type(quantity) is not int or not 0 <= quantity <= order['quantity']:
+                        raise ValueError('保留间数须在 0 到原订单间数之间')
+                    protected = sum(b['status'] != '预订' for b in live_linked(s, order))
+                    if quantity < protected:
+                        raise ValueError('保留间数少于已入住/已退房记录，请先核对这些房号，不能自动取消真实住宿')
+                    order['localQuantityCap'] = quantity
+                assigned, skipped = auto_assign_orders(s, {order['id']})
+                note = f'平台订单 {order["id"]} · 本机保留 {order_quantity(order)} 间 · 补全分房 {assigned} 间 · 待核对 {skipped} 间'
             elif action == 'platform-check':
                 current, kind, platform = data.get('date'), data.get('kind'), data.get('platform')
                 if kind not in ROOMS or platform not in ('ctrip', 'meituan') or not today() <= current <= (date.today()+timedelta(days=366)).isoformat():
@@ -557,11 +688,14 @@ class Store:
                 self.validate_backup(restored)
                 revision = s['revision']
                 s = restored
+                upgrade_ota_rules(s)
                 s['revision'] = revision
                 s['confirmed'] = {}
                 note = '从 JSON 备份恢复；恢复前数据已自动备份；请重新核对平台库存'
             else:
                 raise ValueError('不支持的操作')
+            if action in ['quick-cancel', 'quick-edit', 'quick-delete', 'quick-restore', 'quick-batch']:
+                sync_local_cancellations(s, before)
             s['revision'] += 1
             s['audit'].append({'at': now(), 'text': note})
             s['audit'] = s['audit'][-2000:]
