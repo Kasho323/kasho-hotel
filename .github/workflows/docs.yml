@@ -1,0 +1,75 @@
+name: Documentation
+
+on:
+  push:
+    paths:
+      - 'README.md'
+      - 'PROJECTS.md'
+      - 'assets/portfolio-header.svg'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'README.md'
+      - 'PROJECTS.md'
+      - 'assets/portfolio-header.svg'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local-links:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check local links, heading links, code fences and SVG
+        shell: python
+        run: |
+          import re
+          from pathlib import Path
+          from urllib.parse import unquote, urlsplit
+          from xml.etree import ElementTree
+          
+          root = Path.cwd().resolve()
+          errors = []
+          checked = 0
+          for name in ("README.md", "PROJECTS.md"):
+              page = root / name
+              if not page.exists():
+                  continue
+              source = page.read_text(encoding="utf-8")
+              body = re.sub(r"^```.*?^```[^\n]*", "", source, flags=re.M | re.S)
+              headings = {
+                  re.sub(r"[^\w\- ]", "", heading.strip().lower()).replace(" ", "-")
+                  for heading in re.findall(r"^#{1,6}\s+(.+)$", body, re.M)
+              }
+              for target in re.findall(r"\]\(([^\n)]+)\)", body):
+                  target = target.strip()
+                  if target.startswith("<") and target.endswith(">"):
+                      target = target[1:-1]
+                  parts = urlsplit(target)
+                  if parts.scheme or parts.netloc:
+                      continue
+                  if not parts.path:
+                      if parts.fragment and unquote(parts.fragment) not in headings:
+                          errors.append(f"{name}: missing heading {target}")
+                      continue
+                  dest = (page.parent / unquote(parts.path)).resolve()
+                  if not dest.is_relative_to(root) or not dest.exists():
+                      errors.append(f"{name}: missing local target {target}")
+                  checked += 1
+              if len(re.findall(r"^```", source, re.M)) % 2:
+                  errors.append(f"{name}: unclosed code fence")
+          banner = root / "assets/portfolio-header.svg"
+          if banner.exists():
+              ElementTree.parse(banner)
+          if errors:
+              raise SystemExit("\n".join(errors))
+          print(f"Documentation checks passed: {checked} local links.")
